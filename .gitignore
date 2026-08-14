@@ -219,3 +219,5 @@ __marimo__/
 
 enwik8.gz
 enwik9
+*.pkl
+*.bin

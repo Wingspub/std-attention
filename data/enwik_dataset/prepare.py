@@ -1,5 +1,6 @@
-import numpy as np
 import os
+from dataset.byte_tokenizer import ByteTokenizer
+import numpy as np
 
 # settings
 train_vaild_split_rate = 0.9
@@ -17,20 +18,18 @@ ROOT = os.path.dirname(__file__)
 input_file_path = os.path.join(ROOT, 'enwik9')
 with open(input_file_path, 'br') as f:
     text = f.read()
-    data = np.frombuffer(text, dtype=np.uint8)
-    print(len(data))
+
+n = len(text)
+print(n)
 
 # 字符统计得到 -> tokenizer
+tokenzier = ByteTokenizer(text)
+tokenzier_path = os.path.join(ROOT, "tokenizer.pkl")
+tokenzier.save(tokenzier_path)
 
-
-
-
-# 映射得到 -> ID
 # 拆分得到trian 和 valid数据集
-
-
-
-
-
-
-
+train_data_path = os.path.join(ROOT, "train.bin")
+valid_data_path = os.path.join(ROOT, "valid.bin")
+train_idx = int(n * train_vaild_split_rate)
+train_data = np.array(tokenzier.encode(text[:train_idx]), dtype=np.uint8).tofile(train_data_path)
+valid_data = np.array(tokenzier.encode(text[train_idx:]), dtype=np.uint8).tofile(valid_data_path)
