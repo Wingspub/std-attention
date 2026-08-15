@@ -1,10 +1,19 @@
 """字节级tokenizer"""
 from typing import List
 import pickle as pkl
-import os
+
 
 class ByteTokenizer:
-    def __init__(self, byte_data: bytes) -> None:
+    def __init__(self, path: str | None = None) -> None:
+        self.b2id = dict()
+        self.id2b = dict()
+        self.vocab_num = 0
+
+        if isinstance(path, str):
+            self.load(path)
+
+
+    def train(self, byte_data: bytes) -> None:
         b2id, id2b = dict(), dict()
         data = list(set(byte_data))
         print("total vocab num: ", len(data))

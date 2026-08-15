@@ -23,7 +23,8 @@ n = len(text)
 print(n)
 
 # 字符统计得到 -> tokenizer
-tokenzier = ByteTokenizer(text)
+tokenzier = ByteTokenizer()
+tokenzier.train(byte_data=text)
 tokenzier_path = os.path.join(ROOT, "tokenizer.pkl")
 tokenzier.save(tokenzier_path)
 
