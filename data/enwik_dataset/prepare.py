@@ -3,7 +3,7 @@ from dataset.byte_tokenizer import ByteTokenizer
 import numpy as np
 
 # settings
-train_vaild_split_rate = 0.9
+train_vaild_split_rate = 0.99
 
 # data loading
 ROOT = os.path.dirname(__file__)

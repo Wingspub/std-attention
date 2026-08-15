@@ -217,6 +217,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# logs
+logs
+
+# dataset
 enwik8.gz
 enwik9
 *.pkl
