@@ -25,7 +25,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cp
 ## model
 dims = 512
 layer_num = 6
-lr = 3e-5
+lr = 5e-4
 
 # data init
 dataset_name = "enwik_dataset"
@@ -50,7 +50,22 @@ torch.set_float32_matmul_precision('high')
 optimizer = optim.Adam(model.parameters(), lr=lr)
 loss_func = CrossEntropyLoss()
 
-def train(model, seq_data: torch.Tensor, device: torch.device) -> float:
+
+def get_grad_norm(model, norm_type=2.0) -> float:
+    """
+    计算模型所有参数梯度的总范数。
+    norm_type=2.0 表示 L2 范数，即常见的 grad_norm。
+    """
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.detach().data.norm(norm_type)
+            total_norm += param_norm.item() ** norm_type
+    total_norm = total_norm ** (1.0 / norm_type)
+    return total_norm
+
+
+def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, float, float]:
     '''模型训练'''
     model.train()
     # source data and target data
@@ -63,11 +78,13 @@ def train(model, seq_data: torch.Tensor, device: torch.device) -> float:
     # loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, token_num), Y.reshape(-1)))
     loss = cast(torch.Tensor, loss_func(y_pred.transpose(1, 2), Y))
     loss.backward()
-    # torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+    grad_norm_before = get_grad_norm(model)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    grad_norm_afert = get_grad_norm(model)
     optimizer.step()
     optimizer.zero_grad()
 
-    return loss.cpu().item()
+    return loss.cpu().item(), grad_norm_before, grad_norm_afert
 
 
 def top_k(logits, thres = 0.9):
@@ -159,10 +176,12 @@ for data in train_dataloader:
         print(f"valid_loss:{valid_mean:.6f}")
         writer.add_scalar("Valid/loss", valid_mean, temp_step+1)
 
-    loss = train(model=model, seq_data=data, device=device)
+    loss, grad_norm_b, grad_norm_a = train(model=model, seq_data=data, device=device)
     writer.add_scalar("Train/loss", loss, temp_step+1)
+    writer.add_scalar("Train/grad_norm_before", grad_norm_b, temp_step+1)
+    writer.add_scalar("Train/grad_norm_after", grad_norm_a, temp_step+1)
 
-    if temp_step % loss_print_num == 0: print(f"step:{temp_step}, loss:{loss:.6f}")
+    if temp_step % loss_print_num == 0: print(f"step:{temp_step}, loss:{loss:.6f}, grad_norm_before:{grad_norm_b:.6f}, grad_norm_after:{grad_norm_a:.6f}")
 
     temp_step += 1
     if temp_step >= iter_num:
