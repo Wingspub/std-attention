@@ -9,7 +9,6 @@ from torch import optim, nn
 from torch.nn import CrossEntropyLoss
 from typing import Tuple, cast
 import torch
-from time import time
 
 print("this is a next token prediction task")
 
@@ -51,20 +50,6 @@ optimizer = optim.Adam(model.parameters(), lr=lr)
 loss_func = CrossEntropyLoss()
 
 
-def get_grad_norm(model, norm_type=2.0) -> float:
-    """
-    计算模型所有参数梯度的总范数。
-    norm_type=2.0 表示 L2 范数，即常见的 grad_norm。
-    """
-    total_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.detach().data.norm(norm_type)
-            total_norm += param_norm.item() ** norm_type
-    total_norm = total_norm ** (1.0 / norm_type)
-    return total_norm
-
-
 def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, float, float]:
     '''模型训练'''
     model.train()
@@ -78,57 +63,13 @@ def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, f
     # loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, token_num), Y.reshape(-1)))
     loss = cast(torch.Tensor, loss_func(y_pred.transpose(1, 2), Y))
     loss.backward()
-    grad_norm_before = get_grad_norm(model)
+    grad_norm_before = model.get_grad_norm()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    grad_norm_afert = get_grad_norm(model)
+    grad_norm_afert = model.get_grad_norm()
     optimizer.step()
     optimizer.zero_grad()
 
     return loss.cpu().item(), grad_norm_before, grad_norm_afert
-
-
-def top_k(logits, thres = 0.9):
-    k = int((1 - thres) * logits.shape[-1])
-    val, ind = torch.topk(logits, k)
-    probs = torch.full_like(logits, float('-inf'))
-    probs.scatter_(1, ind, val)
-    return probs
-
-
-@torch.inference_mode()
-def generate(
-    model,
-    src_seq: torch.Tensor,
-    seq_len: int,
-    device: torch.device,
-    temperature: float = 1.,
-    filter_logits_fn = top_k,
-    filter_thres: float = 0.9,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    '''生成字符'''
-    model.eval()
-    batch, src_len = src_seq.shape
-    assert src_len <= seq_len
-
-    gen_len = seq_len - src_len
-    sub_len = src_len - gen_len
-
-    response = torch.zeros((batch, seq_len), dtype=torch.int32).to(device)
-    response[:, :sub_len] = src_seq[:, :sub_len]
-    start = time()
-    for i in range(sub_len, seq_len):
-        output_pred = model(response[:, :i])[:, -1, :]
-        # response[:, i] = torch.argmax(output_pred, dim=-1)
-        filtered_logits = filter_logits_fn(output_pred, thres = filter_thres)
-        probs = nn.functional.softmax(filtered_logits / temperature, dim=-1)
-        sample = torch.multinomial(probs, 1)
-        response[:, i] = sample.squeeze(1)
-        del output_pred
-
-    end = time()
-    rate = (seq_len-sub_len) / (end-start)
-    print(f"speed:{rate:.2f} tokens/s")
-    return src_seq, response
 
 
 @torch.inference_mode()
@@ -146,7 +87,7 @@ def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) ->
     src_text = b""
     gen_text = b""
     if gen_flag:
-        src_bytes, gen_bytes = generate(model=model, src_seq=seq_data, seq_len=SEQ_LEN+GEN_LEN, device=device)
+        src_bytes, gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN)
         src_bytes_text, gen_bytes_text = [c.item() for c in src_bytes[0]], [c.item() for c in gen_bytes[0]]
         src_text, gen_text = tokenizer.decode(src_bytes_text), tokenizer.decode(gen_bytes_text)
 
