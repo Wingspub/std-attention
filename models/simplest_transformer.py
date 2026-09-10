@@ -15,7 +15,7 @@ class KV_Cache():
         if len(self.kv_cache[layer_id][0]) == 0 and len(self.kv_cache[layer_id][1]) == 0:
             return torch.Tensor([]), torch.Tensor([])
         else:
-            return torch.concat(self.kv_cache[layer_id][0]), torch.concat(self.kv_cache[layer_id][1])
+            return torch.concat(self.kv_cache[layer_id][0], dim=1), torch.concat(self.kv_cache[layer_id][1], dim=1)
 
 
     def update(self, layer_id: int,  kv_vector: Tuple[torch.Tensor, torch.Tensor]) -> None:
@@ -77,28 +77,27 @@ class AdvancedSequentialModel(nn.Module):
 
     def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None):
         # input_embs (B, L, d)
-        B, L, d = input_embs.shape
+        B, L, _ = input_embs.shape
 
         if if_cache is False or kv_cache is None:
             query = cast(torch.Tensor, self.W_Q(input_embs))
             key = cast(torch.Tensor, self.W_K(input_embs))
             value = cast(torch.Tensor, self.W_V(input_embs))
+            mask_diagonal = 0
         else:
-            past_len = len(kv_cache[self.layer_id][0])
-            input_embs = input_embs[:, past_len:, :]
-
             query = cast(torch.Tensor, self.W_Q(input_embs))
             key = cast(torch.Tensor, self.W_K(input_embs))
             value = cast(torch.Tensor, self.W_V(input_embs))
 
             kv_cache.update(self.layer_id, (key, value))
             key, value = kv_cache[self.layer_id]
+            mask_diagonal = key.shape[1]
 
 
         # weight
         ## V0 std softmax
         QK = query @ key.transpose(1, 2)
-        causal_mask = torch.log(torch.tril(torch.ones((query.shape[1], key.shape[1]), device=query.device)))
+        causal_mask = torch.log(torch.tril(torch.ones((query.shape[1], key.shape[1]), device=query.device), diagonal=key.shape[1]-query.shape[1]))
         A = torch.softmax(QK + causal_mask, dim=-1)
 
         # V0.1 not softmax
@@ -206,7 +205,11 @@ class SimplestTransformer(nn.Module):
 
         # process
         for i in range(start_idx, end_idx):
-            pred, kv_cache = self.forward(response[:, :i], if_cache, kv_cache)
+            if if_cache:
+                inp =  response[:, :i] if i == start_idx else response[:, i-1:i]
+                pred, kv_cache = self.forward(inp, if_cache, kv_cache)
+            else:
+                pred, kv_cache = self.forward(response[:, :i], if_cache, kv_cache)
             output_pred = pred[:, -1, :]
 
             if mode == "greedy":
