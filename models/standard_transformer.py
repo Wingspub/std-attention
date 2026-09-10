@@ -14,6 +14,7 @@ class STDConfig:
     layer_num  = 6
     embed_dims = 512
     heads = 6
+    if_bias=False
     p = 0.0
 
     def __init__(
@@ -22,12 +23,14 @@ class STDConfig:
         layer_num=6,
         embed_dims=512,
         heads=6,
+        if_bias=False,
         p=0.0
     ) -> None:
         self.vocab_num = vocab_num
         self.layer_num = layer_num
         self.embed_dims = embed_dims
         self.heads = heads
+        self.if_bias = if_bias
         self.p = p
 
         # validate
@@ -39,14 +42,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, config: STDConfig):
         super().__init__()
         embed_dims = config.embed_dims
-        p=config.p
+        if_bias = config.if_bias
+        p = config.p
 
         self.heads = config.heads
         self.heads_dims = embed_dims // self.heads
 
-        self.W_Q = nn.Linear(embed_dims, embed_dims, bias=False)
-        self.W_K = nn.Linear(embed_dims, embed_dims, bias=False)
-        self.W_V = nn.Linear(embed_dims, embed_dims, bias=False)
+        self.W_Q = nn.Linear(embed_dims, embed_dims, bias=if_bias)
+        self.W_K = nn.Linear(embed_dims, embed_dims, bias=if_bias)
+        self.W_V = nn.Linear(embed_dims, embed_dims, bias=if_bias)
 
         self.score_dropout = nn.Dropout(p=p)
         self.residual_dropout = nn.Dropout(p=p)
@@ -55,44 +59,44 @@ class MultiHeadAttention(nn.Module):
         self.output_proj = nn.Linear(embed_dims, embed_dims)
 
 
-    def forward(self, input_seq_embs: torch.Tensor) -> torch.Tensor:
-        B, L, d = input_seq_embs.shape
+    def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
+        B, L, d = input_embs.shape
 
-        Q = cast(torch.Tensor, self.W_Q(input_seq_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
-        K = cast(torch.Tensor, self.W_K(input_seq_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
-        V = cast(torch.Tensor, self.W_V(input_seq_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
+        query = cast(torch.Tensor, self.W_Q(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
+        key = cast(torch.Tensor, self.W_K(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
+        value = cast(torch.Tensor, self.W_V(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
 
         # A: score matrix
-        A = torch.matmul(Q, K.transpose(-1, -2)) / self.heads_dims ** 0.5
-        mask = torch.log(torch.tril(torch.ones_like(A, dtype=torch.bool)))
-        A = torch.softmax(A + mask, dim=-1)
-        output = torch.matmul(self.score_dropout(A), V).transpose(1, 2).contiguous().reshape(B, L, d)
+        QK = torch.matmul(query, key.transpose(-1, -2)) / self.heads_dims ** 0.5
+        mask =  torch.log(torch.tril(torch.ones((query.shape[-2], key.shape[-2]), device=query.device), diagonal=key.shape[-2]-query.shape[-2]))
+        A = torch.softmax(QK + mask, dim=-1)
+        output = torch.matmul(self.score_dropout(A), value).transpose(1, 2).contiguous().reshape(B, L, d)
 
         # output
         output = self.residual_dropout(self.output_proj(output))
 
-        return output
+        return output, kv_cache
 
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: STDConfig):
         super().__init__()
-
+        if_bias = config.if_bias
         embed_dims = config.embed_dims
 
         self.attention = MultiHeadAttention(config=config)
         self.LN1 = nn.LayerNorm(embed_dims)
         self.FFN = nn.Sequential(
-            nn.Linear(embed_dims, embed_dims),
+            nn.Linear(embed_dims, embed_dims*4, bias=if_bias),
             nn.ReLU(),
-            nn.Linear(embed_dims, embed_dims)
+            nn.Linear(embed_dims*4, embed_dims, bias=if_bias)
         )
         self.LN2 = nn.LayerNorm(embed_dims)
 
 
-    def forward(self, input_embs: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # Attention
-        embs = self.attention(input_embs)
+        embs, kv_cache = self.attention(input_embs, if_cache, kv_cache)
         embs = self.LN1(embs)
         output_embs = input_embs + embs
 
@@ -101,7 +105,7 @@ class TransformerBlock(nn.Module):
         embs = self.LN2(embs)
         output_embs = output_embs + embs
 
-        return output_embs
+        return output_embs, kv_cache
 
 
 class STDModel(nn.Module):
@@ -115,12 +119,12 @@ class STDModel(nn.Module):
             transformerBlock = TransformerBlock(config)
             self.layer_block.append(transformerBlock)
 
-    def forward(self, input_embs: torch.Tensor):
+    def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None):
 
         for layer in self.layer_block:
-            x = layer(input_embs)
+            x, kv_cache = layer(input_embs, if_cache, kv_cache)
 
-        return x
+        return x, kv_cache
 
 
 class STDTransformer(nn.Module):
@@ -136,15 +140,21 @@ class STDTransformer(nn.Module):
         self.output_proj = nn.Linear(embed_dims, vocab_num)
 
 
-    def position_vector(self, seq_len: int) -> torch.Tensor:
+    def position_vector(self, seq_len: int, base: float=10000) -> torch.Tensor:
+        """
+        input_embs: (X, L, d) -> position_embs (X, L(1:L), d((sin, cos), ...))
+
+        PE_{i, 2j}   = sin(i / 10000^{2j/d})
+        PE_{i, 2j+1} = cos(i / 10000^{2j/d})
+
+        """
         position_index = torch.arange(seq_len).unsqueeze(1)
         dim_index = torch.arange(self.embed_dims)
         dim_index[::2] = dim_index[::2] / 2
         dim_index[1::2] = (dim_index[1::2] - 1) / 2
-        dim_index = 10000 ** (dim_index.unsqueeze(0)/self.embed_dims)
-        position_matrix = position_index/dim_index
+        coef = base ** (dim_index.unsqueeze(0)/self.embed_dims)
+        position_matrix = position_index/coef
 
-        # 偶数为cos，奇数为sin
         position_matrix[:, ::2] = torch.sin(position_matrix[:, ::2])
         position_matrix[:, 1::2] = torch.cos(position_matrix[:, 1::2])
 
@@ -159,7 +169,7 @@ class STDTransformer(nn.Module):
         embeddings = embeddings + position_embeddings
 
         # model
-        embeddings = self.model(embeddings)
+        embeddings, kv_cache = self.model(embeddings, if_cache, kv_cache)
 
         # output
         output = self.output_proj(embeddings)

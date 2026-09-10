@@ -45,7 +45,7 @@ valid_dataset = DataLoader(valid_dataset, batch_size=batch_size)
 vocab_num = tokenizer.vocab_num
 ## Simplest
 # model = SimplestTransformer(vocab_num=vocab_num, layers_num=layer_num, dims=dims).to(device)
-## Std Transformers
+## standard Transformers
 config = STDConfig(vocab_num=vocab_num, layer_num=layer_num, embed_dims=dims, heads=4)
 model = STDTransformer(config=config).to(device)
 
