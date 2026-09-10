@@ -24,7 +24,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cp
 ## model
 dims = 512
 layer_num = 6
-lr = 5e-4
+lr = 1e-4
 
 # data init
 dataset_name = "enwik_dataset"
@@ -58,7 +58,7 @@ def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, f
     X = seq_data[:, :-1]
     Y = seq_data[:, 1:]
 
-    y_pred = cast(torch.Tensor, model(X))   # [B, L, token_num]
+    y_pred = cast(torch.Tensor, model(X)[0])   # [B, L, token_num]
 
     # loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, token_num), Y.reshape(-1)))
     loss = cast(torch.Tensor, loss_func(y_pred.transpose(1, 2), Y))
@@ -80,15 +80,15 @@ def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) ->
     X = seq_data[:, :-1]
     Y = seq_data[:, 1:]
 
-    y_pred = cast(torch.Tensor, model(X))
+    y_pred = cast(torch.Tensor, model(X)[0])
     loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, vocab_num), Y.reshape(-1)))
 
     # generate
     src_text = b""
     gen_text = b""
     if gen_flag:
-        src_bytes, gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN)
-        src_bytes_text, gen_bytes_text = [c.item() for c in src_bytes[0]], [c.item() for c in gen_bytes[0]]
+        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN)
+        src_bytes_text, gen_bytes_text = [c.item() for c in seq_data[0]], [c.item() for c in gen_bytes[0]]
         src_text, gen_text = tokenizer.decode(src_bytes_text), tokenizer.decode(gen_bytes_text)
 
     return loss.item(), src_text.decode("utf-8", errors="replace"), gen_text.decode("utf-8", errors="replace")

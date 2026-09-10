@@ -12,7 +12,10 @@ class KV_Cache():
 
     def __getitem__(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
         assert layer_id < len(self.kv_cache)
-        return torch.concat(self.kv_cache[layer_id][0]), torch.concat(self.kv_cache[layer_id][1])
+        if len(self.kv_cache[layer_id][0]) == 0 and len(self.kv_cache[layer_id][1]) == 0:
+            return torch.Tensor([]), torch.Tensor([])
+        else:
+            return torch.concat(self.kv_cache[layer_id][0]), torch.concat(self.kv_cache[layer_id][1])
 
 
     def update(self, layer_id: int,  kv_vector: Tuple[torch.Tensor, torch.Tensor]) -> None:
@@ -76,17 +79,26 @@ class AdvancedSequentialModel(nn.Module):
         # input_embs (B, L, d)
         B, L, d = input_embs.shape
 
-        if if_cache:
-            ...
+        if if_cache is False or kv_cache is None:
+            query = cast(torch.Tensor, self.W_Q(input_embs))
+            key = cast(torch.Tensor, self.W_K(input_embs))
+            value = cast(torch.Tensor, self.W_V(input_embs))
         else:
+            past_len = len(kv_cache[self.layer_id][0])
+            input_embs = input_embs[:, past_len:, :]
+
             query = cast(torch.Tensor, self.W_Q(input_embs))
             key = cast(torch.Tensor, self.W_K(input_embs))
             value = cast(torch.Tensor, self.W_V(input_embs))
 
+            kv_cache.update(self.layer_id, (key, value))
+            key, value = kv_cache[self.layer_id]
+
+
         # weight
         ## V0 std softmax
         QK = query @ key.transpose(1, 2)
-        causal_mask = torch.log(torch.tril(torch.ones((L, L), device=query.device)))
+        causal_mask = torch.log(torch.tril(torch.ones((query.shape[1], key.shape[1]), device=query.device)))
         A = torch.softmax(QK + causal_mask, dim=-1)
 
         # V0.1 not softmax
@@ -100,7 +112,7 @@ class AdvancedSequentialModel(nn.Module):
         output = A @ value
         output = self.output_proj(output)
 
-        return output
+        return output, kv_cache
 
 
 class SimplestBlock(nn.Module):
@@ -118,13 +130,13 @@ class SimplestBlock(nn.Module):
     def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None):
 
         # Attention
-        temp_x = self.attention(input_embs, if_cache, kv_cache)
+        temp_x, kv_cache = self.attention(input_embs, if_cache, kv_cache)
         x = input_embs + temp_x
 
         # FFN
         output = x + self.FFN(x)
 
-        return output
+        return output, kv_cache
 
 
 class SimplestTransformer(nn.Module):
@@ -146,7 +158,7 @@ class SimplestTransformer(nn.Module):
         x = self.embeddings(input_seq)
 
         for i in range(self.layers_num):
-            x = self.layers_block[i](x, if_cache, kv_cache)
+            x, kv_cache = self.layers_block[i](x, if_cache, kv_cache)
 
         output = self.output_trans(x)
 
