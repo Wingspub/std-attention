@@ -2,28 +2,7 @@ from typing import cast, Literal, Tuple
 import torch
 from torch import nn
 from time import time
-
-class KV_Cache():
-    def __init__(self, layer_num: int) -> None:
-        # K:(B, L, d), V:(B, L, d)
-        # DynamicCache from transformers
-        self.kv_cache = [[[], []] for _ in range(layer_num)]
-
-
-    def __getitem__(self, layer_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert layer_id < len(self.kv_cache)
-        if len(self.kv_cache[layer_id][0]) == 0 and len(self.kv_cache[layer_id][1]) == 0:
-            return torch.Tensor([]), torch.Tensor([])
-        else:
-            return torch.concat(self.kv_cache[layer_id][0], dim=1), torch.concat(self.kv_cache[layer_id][1], dim=1)
-
-
-    def update(self, layer_id: int,  kv_vector: Tuple[torch.Tensor, torch.Tensor]) -> None:
-        # k
-        self.kv_cache[layer_id][0].append(kv_vector[0])
-
-        # v
-        self.kv_cache[layer_id][1].append(kv_vector[1])
+from .utils import KV_Cache
 
 
 class SimpleSequentialModelV0(nn.Module):
@@ -83,7 +62,6 @@ class AdvancedSequentialModel(nn.Module):
             query = cast(torch.Tensor, self.W_Q(input_embs))
             key = cast(torch.Tensor, self.W_K(input_embs))
             value = cast(torch.Tensor, self.W_V(input_embs))
-            mask_diagonal = 0
         else:
             query = cast(torch.Tensor, self.W_Q(input_embs))
             key = cast(torch.Tensor, self.W_K(input_embs))
@@ -91,7 +69,6 @@ class AdvancedSequentialModel(nn.Module):
 
             kv_cache.update(self.layer_id, (key, value))
             key, value = kv_cache[self.layer_id]
-            mask_diagonal = key.shape[1]
 
 
         # weight
@@ -211,6 +188,7 @@ class SimplestTransformer(nn.Module):
             else:
                 pred, kv_cache = self.forward(response[:, :i], if_cache, kv_cache)
             output_pred = pred[:, -1, :]
+            del pred
 
             if mode == "greedy":
                 response[:, i] = torch.argmax(output_pred, dim=-1)
@@ -221,8 +199,6 @@ class SimplestTransformer(nn.Module):
                 probs = nn.functional.softmax(filtered_logits / temperature, dim=-1)
                 sample = torch.multinomial(probs, 1)
                 response[:, i] = sample.squeeze(1)
-
-            del output_pred
 
         end = time()
         rate = gen_num / (end-start)

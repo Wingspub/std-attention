@@ -3,10 +3,11 @@ import os
 from dataset.byte_tokenizer import ByteTokenizer
 from dataset.enwik_dataset import EnwikDataset
 from models.simplest_transformer import SimplestTransformer
+from models.standard_transformer import STDConfig, STDTransformer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch import optim, nn
-from torch.nn import CrossEntropyLoss
+from torch import optim
+from torch.nn.functional import cross_entropy
 from typing import Tuple, cast
 import torch
 
@@ -14,7 +15,7 @@ print("this is a next token prediction task")
 
 SEQ_LEN = 256
 GEN_LEN = 128
-batch_size = 64
+batch_size = 32
 iter_num = 200000
 loss_print_num = 100
 eval_num = 1000
@@ -37,17 +38,20 @@ tokenizer = ByteTokenizer(os.path.join(dataset_path, "tokenizer.pkl"))
 
 train_dataset = EnwikDataset(train_data, seq_len=SEQ_LEN)
 valid_dataset = EnwikDataset(valid_data, seq_len=SEQ_LEN)
-train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
+train_dataloader = DataLoader(train_dataset, batch_size=2*batch_size)
 valid_dataset = DataLoader(valid_dataset, batch_size=batch_size)
 
 # model
 vocab_num = tokenizer.vocab_num
-model = SimplestTransformer(vocab_num=vocab_num, layers_num=layer_num, dims=dims).to(device)
+## Simplest
+# model = SimplestTransformer(vocab_num=vocab_num, layers_num=layer_num, dims=dims).to(device)
+## Std Transformers
+config = STDConfig(vocab_num=vocab_num, layer_num=layer_num, embed_dims=dims, heads=4)
+model = STDTransformer(config=config).to(device)
 
 torch.set_float32_matmul_precision('high')
 # model = torch.compile(model)
 optimizer = optim.Adam(model.parameters(), lr=lr)
-loss_func = CrossEntropyLoss()
 
 
 def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, float, float]:
@@ -61,7 +65,7 @@ def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, f
     y_pred = cast(torch.Tensor, model(X)[0])   # [B, L, token_num]
 
     # loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, token_num), Y.reshape(-1)))
-    loss = cast(torch.Tensor, loss_func(y_pred.transpose(1, 2), Y))
+    loss = cross_entropy(y_pred.transpose(1, 2), Y)
     loss.backward()
     grad_norm_before = model.get_grad_norm()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -81,13 +85,13 @@ def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) ->
     Y = seq_data[:, 1:]
 
     y_pred = cast(torch.Tensor, model(X)[0])
-    loss = cast(torch.Tensor, loss_func(y_pred.reshape(-1, vocab_num), Y.reshape(-1)))
+    loss = cross_entropy(y_pred.reshape(-1, vocab_num), Y.reshape(-1))
 
     # generate
     src_text = b""
     gen_text = b""
     if gen_flag:
-        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=True)
+        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=False)
         src_bytes_text, gen_bytes_text = [c.item() for c in seq_data[0]], [c.item() for c in gen_bytes[0]]
         src_text, gen_text = tokenizer.decode(src_bytes_text), tokenizer.decode(gen_bytes_text)
 
