@@ -91,7 +91,7 @@ def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) ->
     src_text = b""
     gen_text = b""
     if gen_flag:
-        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=False)
+        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=True)
         src_bytes_text, gen_bytes_text = [c.item() for c in seq_data[0]], [c.item() for c in gen_bytes[0]]
         src_text, gen_text = tokenizer.decode(src_bytes_text), tokenizer.decode(gen_bytes_text)
 

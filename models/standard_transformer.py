@@ -39,12 +39,13 @@ class STDConfig:
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, config: STDConfig):
+    def __init__(self, config: STDConfig, layer_id: int):
         super().__init__()
         embed_dims = config.embed_dims
         if_bias = config.if_bias
         p = config.p
 
+        self.layer_id = layer_id
         self.heads = config.heads
         self.heads_dims = embed_dims // self.heads
 
@@ -62,15 +63,24 @@ class MultiHeadAttention(nn.Module):
     def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         B, L, d = input_embs.shape
 
-        query = cast(torch.Tensor, self.W_Q(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
-        key = cast(torch.Tensor, self.W_K(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
-        value = cast(torch.Tensor, self.W_V(input_embs)).reshape(B, L, self.heads, self.heads_dims).transpose(1, 2)
+        query = cast(torch.Tensor, self.W_Q(input_embs))
+        key = cast(torch.Tensor, self.W_K(input_embs))
+        value = cast(torch.Tensor, self.W_V(input_embs))
+
+        if if_cache and kv_cache is not None:
+            kv_cache.update(self.layer_id, (key, value))
+            key, value = kv_cache[self.layer_id]
+
+
+        query = query.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
+        key = key.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
+        value = value.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
 
         # A: score matrix
         QK = torch.matmul(query, key.transpose(-1, -2)) / self.heads_dims ** 0.5
         mask =  torch.log(torch.tril(torch.ones((query.shape[-2], key.shape[-2]), device=query.device), diagonal=key.shape[-2]-query.shape[-2]))
         A = torch.softmax(QK + mask, dim=-1)
-        output = torch.matmul(self.score_dropout(A), value).transpose(1, 2).contiguous().reshape(B, L, d)
+        output = torch.matmul(self.score_dropout(A), value).transpose(1, 2).contiguous().reshape(B, -1, d)
 
         # output
         output = self.residual_dropout(self.output_proj(output))
@@ -79,12 +89,12 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, config: STDConfig):
+    def __init__(self, config: STDConfig, layer_id: int):
         super().__init__()
         if_bias = config.if_bias
         embed_dims = config.embed_dims
 
-        self.attention = MultiHeadAttention(config=config)
+        self.attention = MultiHeadAttention(config=config, layer_id=layer_id)
         self.LN1 = nn.LayerNorm(embed_dims)
         self.FFN = nn.Sequential(
             nn.Linear(embed_dims, embed_dims*4, bias=if_bias),
@@ -115,8 +125,8 @@ class STDModel(nn.Module):
         self.layer_num = layer_num
 
         self.layer_block = nn.ModuleList()
-        for _ in range(layer_num):
-            transformerBlock = TransformerBlock(config)
+        for layer_id in range(layer_num):
+            transformerBlock = TransformerBlock(config, layer_id)
             self.layer_block.append(transformerBlock)
 
     def forward(self, input_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None):
@@ -163,10 +173,15 @@ class STDTransformer(nn.Module):
 
     def forward(self, input_ids: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # 编码与位置编码
-        L = input_ids.shape[1]
         embeddings = self.embeddings(input_ids)
-        position_embeddings = self.position_vector(L).to(embeddings.device)
-        embeddings = embeddings + position_embeddings
+        if if_cache and kv_cache is not None:
+            L = kv_cache.get_kv_len() + input_ids.shape[1]
+            position_embeddings = self.position_vector(L).to(embeddings.device)
+            embeddings = embeddings + position_embeddings[-input_ids.shape[1]:]
+        else:
+            L = input_ids.shape[1]
+            position_embeddings = self.position_vector(L).to(embeddings.device)
+            embeddings = embeddings + position_embeddings
 
         # model
         embeddings, kv_cache = self.model(embeddings, if_cache, kv_cache)

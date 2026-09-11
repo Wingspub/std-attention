@@ -22,3 +22,10 @@ class KV_Cache:
 
         # v
         self.kv_cache[layer_id][1].append(kv_vector[1])
+
+
+    def get_kv_len(self) -> int:
+        if len(self.kv_cache[0][0]) == 0 and len(self.kv_cache[0][1]) == 0:
+            return 0
+        else:
+            return torch.concat(self.kv_cache[0][0], dim=1).shape[1]

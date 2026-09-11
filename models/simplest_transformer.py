@@ -58,15 +58,11 @@ class AdvancedSequentialModel(nn.Module):
         # input_embs (B, L, d)
         B, L, _ = input_embs.shape
 
-        if if_cache is False or kv_cache is None:
-            query = cast(torch.Tensor, self.W_Q(input_embs))
-            key = cast(torch.Tensor, self.W_K(input_embs))
-            value = cast(torch.Tensor, self.W_V(input_embs))
-        else:
-            query = cast(torch.Tensor, self.W_Q(input_embs))
-            key = cast(torch.Tensor, self.W_K(input_embs))
-            value = cast(torch.Tensor, self.W_V(input_embs))
+        query = cast(torch.Tensor, self.W_Q(input_embs))
+        key = cast(torch.Tensor, self.W_K(input_embs))
+        value = cast(torch.Tensor, self.W_V(input_embs))
 
+        if if_cache and kv_cache is not None:
             kv_cache.update(self.layer_id, (key, value))
             key, value = kv_cache[self.layer_id]
 
