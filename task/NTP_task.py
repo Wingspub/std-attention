@@ -15,7 +15,7 @@ print("this is a next token prediction task")
 
 SEQ_LEN = 256
 GEN_LEN = 128
-batch_size = 32
+batch_size = 64
 iter_num = 200000
 loss_print_num = 100
 eval_num = 1000
@@ -77,7 +77,7 @@ def train(model, seq_data: torch.Tensor, device: torch.device) -> Tuple[float, f
 
 
 @torch.inference_mode()
-def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) -> Tuple[float, str, str]:
+def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) -> Tuple[float, str, str, float, float]:
     model.eval()
     # CE loss
     seq_data = seq_data.to(device)
@@ -90,12 +90,22 @@ def eval(model, seq_data: torch.Tensor, gen_flag: bool, device: torch.device) ->
     # generate
     src_text = b""
     gen_text = b""
+
+    gen_data = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=True)
     if gen_flag:
-        gen_bytes = model.generate(src_data=seq_data, gen_num=2*GEN_LEN, back_num=GEN_LEN, if_cache=True)
-        src_bytes_text, gen_bytes_text = [c.item() for c in seq_data[0]], [c.item() for c in gen_bytes[0]]
+        src_bytes_text, gen_bytes_text = [c.item() for c in seq_data[0]], [c.item() for c in gen_data[0]]
         src_text, gen_text = tokenizer.decode(src_bytes_text), tokenizer.decode(gen_bytes_text)
 
-    return loss.item(), src_text.decode("utf-8", errors="replace"), gen_text.decode("utf-8", errors="replace")
+    ## gen loss
+    X = gen_data[:, :-1]
+    Y = gen_data[:, 1:]
+    y_pred = cast(torch.Tensor, model(X)[0])
+    all_loss = cross_entropy(y_pred.permute(0, 2, 1), Y.long(), reduction="none")
+
+    intra_gen_loss = torch.mean(all_loss[:, SEQ_LEN-GEN_LEN:SEQ_LEN]).cpu().item()
+    extra_gen_loss = torch.mean(all_loss[:, SEQ_LEN:]).cpu().item()
+
+    return loss.item(), src_text.decode("utf-8", errors="replace"), gen_text.decode("utf-8", errors="replace"), intra_gen_loss, extra_gen_loss
 
 
 # record
@@ -104,13 +114,15 @@ writer = SummaryWriter("logs")
 temp_step = 0
 for data in train_dataloader:
     if (temp_step+1) % eval_num == 0:
-        loss = []
+        loss, intra_loss, extra_loss = [], [], []
         flag = True
         valid_num = 0
         for valid_data in valid_dataset:
             valid_num += 1
-            valid_loss, src_text, gen_text = eval(model=model, seq_data=valid_data, gen_flag=flag, device=device)
+            valid_loss, src_text, gen_text, valid_intra_loss, valid_extra_loss = eval(model=model, seq_data=valid_data, gen_flag=flag, device=device)
             loss.append(valid_loss)
+            intra_loss.append(valid_intra_loss)
+            extra_loss.append(valid_extra_loss)
             if flag:
                 print(f"[src_text]:\n{src_text}")
                 print(f"[gen_text]:\n{gen_text}")
@@ -118,8 +130,12 @@ for data in train_dataloader:
             if valid_num > loss_print_num:
                 break
         valid_mean = np.mean(valid_loss)
-        print(f"valid_loss:{valid_mean:.6f}")
+        intra_mean = np.mean(intra_loss)
+        extra_mean = np.mean(extra_loss)
+        print(f"valid_loss:{valid_mean:.6f}, intra_loss:{intra_mean:.6f}, extra_loss:{extra_mean:.6f}")
         writer.add_scalar("Valid/loss", valid_mean, temp_step+1)
+        writer.add_scalar("Valid/intra_loss", intra_mean, temp_step+1)
+        writer.add_scalar("Valid/extra_loss", extra_mean, temp_step+1)
 
     loss, grad_norm_b, grad_norm_a = train(model=model, seq_data=data, device=device)
     writer.add_scalar("Train/loss", loss, temp_step+1)

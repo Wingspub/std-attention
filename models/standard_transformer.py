@@ -253,5 +253,5 @@ class STDTransformer(nn.Module):
 
         end = time()
         rate = gen_num / (end-start)
-        print(f"speed:{rate:.2f} tokens/s")
+        # print(f"speed:{rate:.2f} tokens/s")
         return response
