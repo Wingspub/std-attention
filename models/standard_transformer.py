@@ -71,7 +71,6 @@ class MultiHeadAttention(nn.Module):
             kv_cache.update(self.layer_id, (key, value))
             key, value = kv_cache[self.layer_id]
 
-
         query = query.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
         key = key.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
         value = value.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)

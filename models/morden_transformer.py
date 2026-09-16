@@ -107,6 +107,7 @@ class MultiHeadAttention(nn.Module):
         embed_dims = config.embed_dims
         p = config.p
 
+        self.layer_id = layer_id
         self.heads = config.heads
         self.heads_dims = embed_dims // self.heads
 
@@ -123,16 +124,24 @@ class MultiHeadAttention(nn.Module):
         self.output_proj = nn.Linear(embed_dims, embed_dims, bias=if_bias)
 
 
-    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], is_causal: bool=False) -> torch.Tensor:
+    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], if_cache: bool = False, kv_cache: KV_Cache | None = None) -> torch.Tensor:
         B, L, d = input_embs.shape
 
-        query = cast(torch.Tensor, self.W_Q(input_embs)).reshape(B, L, self.heads, self.heads_dims)
-        key = cast(torch.Tensor, self.W_K(input_embs)).reshape(B, L, self.heads, self.heads_dims)
-        value = cast(torch.Tensor, self.W_V(input_embs)).reshape(B, L, self.heads, self.heads_dims)
+        query = cast(torch.Tensor, self.W_Q(input_embs))
+        key = cast(torch.Tensor, self.W_K(input_embs))
+        value = cast(torch.Tensor, self.W_V(input_embs))
+
+        if if_cache and kv_cache is not None:
+            kv_cache.update(self.layer_id, (key, value))
+            key, value = kv_cache[self.layer_id]
+
+        query = query.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
+        key = key.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
+        value = value.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
         query, key = self.q_norm(query), self.k_norm(key)
 
         cos, sin = position_embeddings
-        query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=1)
+        query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=1)    # TODO change the function
         query, key, value = query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
 
         # A: score matrix
@@ -161,10 +170,10 @@ class AttentionBlock(nn.Module):
         self.LN2 = RMSNorm(embed_dims)
 
 
-    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # Attention
         normed = self.LN1(input_embs)
-        embs = self.attention(normed, position_embeddings=position_embeddings, is_causal=True)
+        embs, kv_cache = self.attention(normed, position_embeddings, if_cache, kv_cache)
         x = input_embs + embs
 
         # FFN
@@ -172,7 +181,7 @@ class AttentionBlock(nn.Module):
         embs = self.FFN(normed)
         output_embs = x + embs
 
-        return output_embs
+        return output_embs, kv_cache
 
 
 class ModernModel(nn.Module):
@@ -186,11 +195,11 @@ class ModernModel(nn.Module):
             self.layer_list.append(transformerBlock)
 
 
-    def forward(self, input_embs: torch.Tensor, position_embs: torch.Tensor):
+    def forward(self, input_embs: torch.Tensor, position_embs: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None):
         for layer in self.layer_list:
-            embeddings = layer(input_embs, position_embs)
+            embeddings, kv_cache = layer(input_embs, position_embs, if_cache, kv_cache)
 
-        return embeddings
+        return embeddings, kv_cache
 
 
 class ModernTransformer(nn.Module):
@@ -212,19 +221,19 @@ class ModernTransformer(nn.Module):
         self.output_proj = nn.Linear(embed_dims, vocab_num, bias=config.if_bias)
 
 
-    def forward(self, input_idx: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_idx: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # 编码与位置编码
         L = input_idx.shape[1]
         embeddings = self.embeddings(input_idx)
         position_embeddings = (self.freqs_cos[:L], self.freqs_sin[:L])
 
         # layer
-        embeddings = self.model(embeddings, position_embeddings)
+        embeddings = self.model(embeddings, position_embeddings, if_cache, kv_cache)
 
         # output
         output = self.output_proj(embeddings)
 
-        return output
+        return output, kv_cache
 
 
     @staticmethod
