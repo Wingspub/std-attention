@@ -4,6 +4,7 @@ from dataset.byte_tokenizer import ByteTokenizer
 from dataset.enwik_dataset import EnwikDataset
 from models.simplest_transformer import SimplestTransformer
 from models.standard_transformer import STDConfig, STDTransformer
+from models.modern_transformer import ModernConfig, ModernTransformer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch import optim
@@ -18,7 +19,8 @@ GEN_LEN = 128
 batch_size = 64
 iter_num = 200000
 loss_print_num = 100
-eval_num = 1000
+eval_num = 50
+print_eval_num = 1000
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cpu')
 
@@ -46,8 +48,12 @@ vocab_num = tokenizer.vocab_num
 ## Simplest
 # model = SimplestTransformer(vocab_num=vocab_num, layers_num=layer_num, dims=dims).to(device)
 ## standard Transformers
-config = STDConfig(vocab_num=vocab_num, layer_num=layer_num, embed_dims=dims, heads=4)
-model = STDTransformer(config=config).to(device)
+# config = STDConfig(vocab_num=vocab_num, layer_num=layer_num, embed_dims=dims, heads=4)
+# model = STDTransformer(config=config).to(device)
+## modern Transformers
+config = ModernConfig(vocab_num=vocab_num, layer_num=layer_num, embed_dims=dims, heads=4)
+model = ModernTransformer(config=config).to(device)
+
 
 torch.set_float32_matmul_precision('high')
 # model = torch.compile(model)
@@ -113,7 +119,7 @@ writer = SummaryWriter("logs")
 
 temp_step = 0
 for data in train_dataloader:
-    if (temp_step+1) % eval_num == 0:
+    if (temp_step+1) % print_eval_num == 0:
         loss, intra_loss, extra_loss = [], [], []
         flag = True
         valid_num = 0
@@ -127,7 +133,7 @@ for data in train_dataloader:
                 print(f"[src_text]:\n{src_text}")
                 print(f"[gen_text]:\n{gen_text}")
                 flag = False
-            if valid_num > loss_print_num:
+            if valid_num > eval_num:
                 break
         valid_mean = np.mean(valid_loss)
         intra_mean = np.mean(intra_loss)

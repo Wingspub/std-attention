@@ -38,7 +38,9 @@ def precompute_rope_freqs(dim: int, max_seq_length: int = 32*1024, rope_base: fl
 
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos_weight: torch.Tensor, sin_weight: torch.Tensor, unsqueeze_dim=1) -> Tuple[torch.Tensor, torch.Tensor]:
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
-    q_embed = ((q * cos_weight.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin_weight.unsqueeze(unsqueeze_dim))).to(q.dtype)
+    q_length = q.shape[1]
+
+    q_embed = ((q * cos_weight[-q_length:].unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin_weight[-q_length:].unsqueeze(unsqueeze_dim))).to(q.dtype)
     k_embed = ((k * cos_weight.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin_weight.unsqueeze(unsqueeze_dim))).to(k.dtype)
     return q_embed, k_embed
 
@@ -124,8 +126,8 @@ class MultiHeadAttention(nn.Module):
         self.output_proj = nn.Linear(embed_dims, embed_dims, bias=if_bias)
 
 
-    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], if_cache: bool = False, kv_cache: KV_Cache | None = None) -> torch.Tensor:
-        B, L, d = input_embs.shape
+    def forward(self, input_embs: torch.Tensor, position_embeddings: Tuple[torch.Tensor, torch.Tensor], if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
+        B, _, d = input_embs.shape
 
         query = cast(torch.Tensor, self.W_Q(input_embs))
         key = cast(torch.Tensor, self.W_K(input_embs))
@@ -135,28 +137,46 @@ class MultiHeadAttention(nn.Module):
             kv_cache.update(self.layer_id, (key, value))
             key, value = kv_cache[self.layer_id]
 
-        query = query.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
-        key = key.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
-        value = value.reshape(B, -1, self.heads, self.heads_dims).transpose(1, 2)
+        query = query.reshape(B, -1, self.heads, self.heads_dims)
+        key = key.reshape(B, -1, self.heads, self.heads_dims)
+        value = value.reshape(B, -1, self.heads, self.heads_dims)
         query, key = self.q_norm(query), self.k_norm(key)
 
         cos, sin = position_embeddings
-        query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=1)    # TODO change the function
+        query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=1)
         query, key, value = query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
 
         # A: score matrix
-        QK = torch.matmul(query, key.transpose(-1, -2)) / (self.heads_dims)**0.5
-        mask =  torch.log(torch.tril(torch.ones((query.shape[-2], key.shape[-2]), device=query.device), diagonal=key.shape[-2]-query.shape[-2]))
-        A = torch.softmax(QK + mask, dim=-1)
-        output = torch.matmul(self.score_dropout(A), value).transpose(1, 2).contiguous().reshape(B, -1, d)
+        # QK = torch.matmul(query, key.transpose(-1, -2)) / (self.heads_dims)**0.5
+        # mask =  torch.log(torch.tril(torch.ones((query.shape[-2], key.shape[-2]), device=query.device), diagonal=key.shape[-2]-query.shape[-2]))
+        # A = torch.softmax(QK + mask, dim=-1)
+        # output = torch.matmul(self.score_dropout(A), value).transpose(1, 2).contiguous().reshape(B, -1, d)
 
         ## fast impl
-        # scaled_dot_product_attention
+        # FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning
+        # https://arxiv.org/abs/2307.08691
+        L_q = query.size(-2)
+        S   = key.size(-2)
+
+        if L_q == S:
+            # Prefill 或 无 cache：标准因果
+            output = scaled_dot_product_attention(query, key, value, is_causal=True)
+        elif L_q == 1:
+            # 单 token decode：query 在序列最末端，所有 key 都可见
+            output = scaled_dot_product_attention(query, key, value)
+        else:
+            # 多 token + cache：右下角对齐的因果 mask
+            attn_mask = torch.ones(L_q, S, dtype=torch.bool, device=query.device)\
+                            .tril(diagonal=S - L_q)
+            output = scaled_dot_product_attention(query, key, value, attn_mask=attn_mask)
+
+
+        output = output.transpose(1, 2).contiguous().reshape(B, -1, d)
 
         # output
         output = self.residual_dropout(self.output_proj(output))
 
-        return output
+        return output, kv_cache
 
 
 class AttentionBlock(nn.Module):
@@ -223,12 +243,14 @@ class ModernTransformer(nn.Module):
 
     def forward(self, input_idx: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # 编码与位置编码
-        L = input_idx.shape[1]
+        seq_length = input_idx.shape[1]
+        position_length = seq_length + (kv_cache.get_kv_len() if if_cache and kv_cache is not None else 0)
+
         embeddings = self.embeddings(input_idx)
-        position_embeddings = (self.freqs_cos[:L], self.freqs_sin[:L])
+        position_embeddings = (self.freqs_cos[:position_length], self.freqs_sin[:position_length])
 
         # layer
-        embeddings = self.model(embeddings, position_embeddings, if_cache, kv_cache)
+        embeddings, kv_cache = self.model(embeddings, position_embeddings, if_cache, kv_cache)
 
         # output
         output = self.output_proj(embeddings)
