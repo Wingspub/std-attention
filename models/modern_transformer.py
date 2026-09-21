@@ -38,9 +38,7 @@ def precompute_rope_freqs(dim: int, max_seq_length: int = 32*1024, rope_base: fl
 
 def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos_weight: torch.Tensor, sin_weight: torch.Tensor, unsqueeze_dim=1) -> Tuple[torch.Tensor, torch.Tensor]:
     def rotate_half(x): return torch.cat((-x[..., x.shape[-1] // 2:], x[..., : x.shape[-1] // 2]), dim=-1)
-    q_length = q.shape[1]
-
-    q_embed = ((q * cos_weight[-q_length:].unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin_weight[-q_length:].unsqueeze(unsqueeze_dim))).to(q.dtype)
+    q_embed = ((q * cos_weight.unsqueeze(unsqueeze_dim)) + (rotate_half(q) * sin_weight.unsqueeze(unsqueeze_dim))).to(q.dtype)
     k_embed = ((k * cos_weight.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin_weight.unsqueeze(unsqueeze_dim))).to(k.dtype)
     return q_embed, k_embed
 
@@ -133,10 +131,6 @@ class MultiHeadAttention(nn.Module):
         key = cast(torch.Tensor, self.W_K(input_embs))
         value = cast(torch.Tensor, self.W_V(input_embs))
 
-        if if_cache and kv_cache is not None:
-            kv_cache.update(self.layer_id, (key, value))
-            key, value = kv_cache[self.layer_id]
-
         query = query.reshape(B, -1, self.heads, self.heads_dims)
         key = key.reshape(B, -1, self.heads, self.heads_dims)
         value = value.reshape(B, -1, self.heads, self.heads_dims)
@@ -144,6 +138,10 @@ class MultiHeadAttention(nn.Module):
 
         cos, sin = position_embeddings
         query, key = apply_rotary_pos_emb(query, key, cos, sin, unsqueeze_dim=1)
+        if if_cache and kv_cache is not None:
+            kv_cache.update(self.layer_id, (key, value))
+            key, value = kv_cache[self.layer_id]
+
         query, key, value = query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
 
         # A: score matrix
@@ -244,10 +242,11 @@ class ModernTransformer(nn.Module):
     def forward(self, input_idx: torch.Tensor, if_cache: bool = False, kv_cache: KV_Cache | None = None) -> Tuple[torch.Tensor, KV_Cache|None]:
         # 编码与位置编码
         seq_length = input_idx.shape[1]
-        position_length = seq_length + (kv_cache.get_kv_len() if if_cache and kv_cache is not None else 0)
+        start_seq = kv_cache.get_kv_len() if if_cache and kv_cache is not None else 0
+        position_length = seq_length + start_seq
 
         embeddings = self.embeddings(input_idx)
-        position_embeddings = (self.freqs_cos[:position_length], self.freqs_sin[:position_length])
+        position_embeddings = (self.freqs_cos[start_seq:position_length], self.freqs_sin[start_seq:position_length])
 
         # layer
         embeddings, kv_cache = self.model(embeddings, position_embeddings, if_cache, kv_cache)
